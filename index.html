@@ -913,15 +913,18 @@ function setupEvents() {
   });
   document.getElementById('insert-cancel-btn').addEventListener('click', closeInsertModal);
   document.getElementById('insert-item-btn').addEventListener('click', () => {
-    const cat = appData.categories.find(c => c.id === _insertCatId);
+    // closeInsertModal() が _insertCatId / _insertAfterIdx を null にするため先に退避する
+    const cid      = _insertCatId;
+    const afterIdx = _insertAfterIdx;
+    const cat = appData.categories.find(c => c.id === cid);
     if (!cat) { closeInsertModal(); return; }
     const newItem    = { name: '', price: '', desc: '', hl: false, spacer: false };
-    const insertIdx  = (_insertAfterIdx === null) ? cat.items.length : _insertAfterIdx + 1;
+    const insertIdx  = (afterIdx === null) ? cat.items.length : afterIdx + 1;
     cat.items.splice(insertIdx, 0, newItem);
     renderMenu();
     scheduleSave();
     closeInsertModal();
-    openItemModal(_insertCatId, insertIdx);
+    openItemModal(cid, insertIdx);
   });
   document.getElementById('insert-cat-btn').addEventListener('click', () => {
     closeInsertModal();
