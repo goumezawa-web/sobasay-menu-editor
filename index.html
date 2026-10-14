@@ -113,6 +113,8 @@ body {
 .corner.tr { top:5mm; right:5mm;  border-top:1px solid var(--rule); border-right:1px solid var(--rule); }
 .corner.bl { bottom:5mm; left:5mm;  border-bottom:1px solid var(--rule); border-left:1px solid var(--rule); }
 .corner.br { bottom:5mm; right:5mm; border-bottom:1px solid var(--rule); border-right:1px solid var(--rule); }
+/* T-019-001: 四隅のトンボは外す（梅澤指示）。マークアップ/CSSは残し非表示 */
+.corner { display: none !important; }
 .inner {
   padding: 8mm 11mm 9mm;
   display: flex; flex-direction: column; min-height: 297mm;
@@ -369,21 +371,61 @@ body {
   box-shadow: 0 2px 8px rgba(0,0,0,0.25);
 }
 
-/* ── 印刷 ── */
+/* ── 印刷（ブラウザ印刷の保険。既定の「PDF出力」はJSでPDFを生成する） ── */
 @page { size: A4 portrait; margin: 0; }
+@page :first { margin: 0; }
 @media print {
-  html, body { width: 210mm; background: none; margin: 0; padding: 0; }
-  body { padding-bottom: 0 !important; }
-  .page-wrap { width: 210mm !important; height: auto !important; margin: 0 auto !important; }
+  html, body {
+    width: 210mm !important; height: 297mm !important; overflow: hidden !important;
+    background: #fff !important; margin: 0 !important; padding: 0 !important;
+    display: block !important;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .page-wrap {
+    width: 210mm !important; height: 297mm !important; margin: 0 !important;
+    overflow: hidden !important; transform: none !important;
+  }
   .page {
     transform: none !important;
-    box-shadow: none; margin: 0;
-    width: 210mm; min-height: 297mm;
+    box-shadow: none !important; margin: 0 !important;
+    width: 210mm !important; height: 297mm !important; min-height: 0 !important;
+    overflow: hidden !important;
+    break-inside: avoid; page-break-inside: avoid; page-break-after: avoid;
   }
-  .insert-zone, .spacer-del { display: none !important; }
-  #page-overflow-warning { display: none !important; }
+  .inner { height: 297mm !important; min-height: 0 !important; }
+  .corner, .insert-zone, .spacer-del, .empty-cat-add-btn,
+  #page-overflow-warning, #pdf-progress, .modal-overlay, #bottom-toolbar { display: none !important; }
   .logo-text:empty::before { content: none !important; }
+  [contenteditable]:focus { background: none !important; }
 }
+
+/* ── PDF生成時のキャプチャ状態（印刷CSSと同じ見た目に固定） ── */
+body.pdf-capture { display: block; padding: 0; }
+body.pdf-capture .page-wrap { width: 210mm !important; height: 297mm !important; margin: 0 !important; overflow: hidden; }
+body.pdf-capture .page {
+  transform: none !important; box-shadow: none; margin: 0;
+  width: 210mm; height: 297mm; min-height: 0; overflow: hidden;
+}
+body.pdf-capture .inner { height: 297mm; min-height: 0; }
+body.pdf-capture .corner, body.pdf-capture .insert-zone, body.pdf-capture .spacer-del,
+body.pdf-capture .empty-cat-add-btn, body.pdf-capture #page-overflow-warning { display: none !important; }
+body.pdf-capture .logo-text:empty::before { content: none !important; }
+body.pdf-capture [contenteditable]:focus { background: none !important; }
+#pdf-progress {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(255,255,255,0.92);
+  align-items: center; justify-content: center; flex-direction: column; gap: 10px;
+  font-family: 'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif; font-size: 14px; color: #333;
+}
+#pdf-progress.show { display: flex; }
+#pdf-progress .spin {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 3px solid #ddd; border-top-color: #c0392b;
+  animation: pdfspin 0.9s linear infinite;
+}
+@keyframes pdfspin { to { transform: rotate(360deg); } }
+.pdf-modal-note { font-size: 0.8rem; color: #666; line-height: 1.6; }
+.pdf-modal-file { font-size: 0.8rem; color: #1a1a1a; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -989,8 +1031,17 @@ function setupEvents() {
   });
 
   /* ── 下部ツールバー（T-0008 復旧） ── */
-  // PDF出力（印刷）
-  document.getElementById('tb-print').addEventListener('click', () => window.print());
+  // PDF出力（ブラウザ印刷に頼らず、クライアント側でA4 PDFを生成 → 共有/保存）
+  document.getElementById('tb-print').addEventListener('click', exportPDF);
+  document.getElementById('pdf-close-btn').addEventListener('click', closePdfModal);
+  document.getElementById('pdf-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('pdf-modal')) closePdfModal();
+  });
+  document.getElementById('pdf-share-btn').addEventListener('click', () => {
+    if (!_lastPdf) { closePdfModal(); return; }
+    // ユーザー操作の直下で share を呼ぶ（iOS Safari はジェスチャ必須）
+    sharePdf(_lastPdf.blob, _lastPdf.name).then(r => { if (r !== 'aborted') closePdfModal(); });
+  });
 
   // JSON 書き出し
   document.getElementById('tb-export').addEventListener('click', exportJSON);
@@ -1023,6 +1074,179 @@ function setupEvents() {
       e.target.value = '';  // 同一ファイル再選択を許可
     });
   });
+}
+
+/* ─────────────────────────────────────────────────────────
+   PDF出力（T-019-001）
+   iOS Safari の「プリント」は @page margin:0 を無視して URL・日付・ページ番号を
+   ヘッダー/フッターに付けるため、ブラウザ印刷を使わずにクライアント側で
+   A4 PDF を生成する。
+   方式: .page を html2canvas で 300dpi 相当（幅2480px）にラスタライズ →
+         JPEG → 自前で最小の PDF（1ページ・A4・DCTDecode）に包む。
+   html2canvas は PDF 出力時にだけ CDN から読み込む。失敗時は window.print()。
+───────────────────────────────────────────────────────── */
+const H2C_URLS = [
+  'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
+  'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js'
+];
+const PDF_TARGET_WIDTH_PX = 2480;   // A4 幅 210mm @ 300dpi
+let _h2cPromise = null;
+let _lastPdf    = null;             // { blob, name }
+let _pdfBusy    = false;
+
+function loadScriptOnce(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    const timer = setTimeout(() => { s.remove(); reject(new Error('timeout: ' + url)); }, timeoutMs);
+    s.src = url; s.async = true;
+    s.onload  = () => { clearTimeout(timer); resolve(); };
+    s.onerror = () => { clearTimeout(timer); s.remove(); reject(new Error('load error: ' + url)); };
+    document.head.appendChild(s);
+  });
+}
+
+function loadHtml2Canvas() {
+  if (window.html2canvas) return Promise.resolve(window.html2canvas);
+  if (_h2cPromise) return _h2cPromise;
+  _h2cPromise = (async () => {
+    let lastErr = null;
+    for (const url of H2C_URLS) {
+      try { await loadScriptOnce(url, 20000); if (window.html2canvas) return window.html2canvas; }
+      catch (e) { lastErr = e; console.warn('[pdf] html2canvas load failed:', e.message); }
+    }
+    _h2cPromise = null;
+    throw lastErr || new Error('html2canvas unavailable');
+  })();
+  return _h2cPromise;
+}
+
+function nextFrame() { return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); }
+
+function pdfFileName() {
+  const d = new Date();
+  const z = n => String(n).padStart(2, '0');
+  return 'sobasay-menu-' + d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate()) + '.pdf';
+}
+
+/* .page を A4 比率・高解像度でキャプチャ（印刷CSSと同じ見た目に固定して撮る） */
+async function capturePageCanvas(html2canvas) {
+  const page = document.querySelector('.page');
+  const body = document.body;
+  const scrollY = window.scrollY;
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  body.classList.add('pdf-capture');
+  window.scrollTo(0, 0);
+  try {
+    await nextFrame();
+    const w = page.offsetWidth;            // 210mm ≒ 794px
+    const h = page.offsetHeight;           // 297mm ≒ 1123px（capture CSSで固定）
+    const scale = PDF_TARGET_WIDTH_PX / w; // ≒ 3.12 → 300dpi 相当
+    return await html2canvas(page, {
+      scale, width: w, height: h, x: 0, y: 0, scrollX: 0, scrollY: 0,
+      backgroundColor: '#ffffff', useCORS: false, logging: false,
+      imageTimeout: 15000,
+      ignoreElements: el => el.id === 'pdf-progress' || el.id === 'bottom-toolbar' ||
+                            el.id === 'page-overflow-warning' || el.classList.contains('modal-overlay')
+    });
+  } finally {
+    body.classList.remove('pdf-capture');
+    updatePageZoom();
+    window.scrollTo(0, scrollY);
+  }
+}
+
+function canvasToJpeg(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', quality);
+  });
+}
+
+/* 1ページ A4・画像1枚の最小 PDF を自前で組む（外部ライブラリ不要） */
+function buildPdfFromJpeg(jpegBytes, wPx, hPx, title) {
+  const W = 595.28, H = 841.89;  // A4 pt
+  const enc = new TextEncoder();
+  const parts = []; const off = []; let len = 0;
+  const push = x => { const b = (typeof x === 'string') ? enc.encode(x) : x; parts.push(b); len += b.length; };
+  const obj = (n, body) => { off[n] = len; push(n + ' 0 obj\n' + body + '\nendobj\n'); };
+  const pdfStr = s => '(' + s.replace(/[\\()]/g, m => '\\' + m) + ')';
+  push('%PDF-1.4\n'); push(new Uint8Array([0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A]));
+  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  obj(3, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + W + ' ' + H + '] ' +
+         '/Resources << /XObject << /Im1 4 0 R >> /ProcSet [/PDF /ImageC] >> /Contents 5 0 R >>');
+  off[4] = len;
+  push('4 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + wPx + ' /Height ' + hPx +
+       ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + jpegBytes.length + ' >>\nstream\n');
+  push(jpegBytes); push('\nendstream\nendobj\n');
+  const content = 'q ' + W + ' 0 0 ' + H + ' 0 0 cm /Im1 Do Q';
+  obj(5, '<< /Length ' + content.length + ' >>\nstream\n' + content + '\nendstream');
+  obj(6, '<< /Title ' + pdfStr(title) + ' /Producer (sobasay-menu-editor) >>');
+  const xref = len;
+  let x = 'xref\n0 7\n0000000000 65535 f \n';
+  for (let i = 1; i <= 6; i++) x += String(off[i]).padStart(10, '0') + ' 00000 n \n';
+  x += 'trailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R >>\nstartxref\n' + xref + '\n%%EOF\n';
+  push(x);
+  return new Blob(parts, { type: 'application/pdf' });
+}
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+/* iOS/Android: 共有シート（プリント/ファイルに保存）。非対応はダウンロード */
+async function sharePdf(blob, name) {
+  let file = null;
+  try { file = new File([blob], name, { type: 'application/pdf' }); } catch (e) { file = null; }
+  if (file && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return 'shared'; }
+    catch (e) {
+      if (e && e.name === 'AbortError') return 'aborted';
+      console.warn('[pdf] share failed, fallback to download:', e);
+    }
+  }
+  downloadBlob(blob, name);
+  return 'downloaded';
+}
+
+function openPdfModal(name) {
+  document.getElementById('pdf-modal-file').textContent = name;
+  document.getElementById('pdf-modal').removeAttribute('hidden');
+}
+function closePdfModal() { document.getElementById('pdf-modal').setAttribute('hidden', ''); }
+
+async function exportPDF() {
+  if (_pdfBusy) return;
+  _pdfBusy = true;
+  const btn = document.getElementById('tb-print');
+  const prog = document.getElementById('pdf-progress');
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = '作成中…';
+  prog.classList.add('show');
+  try {
+    const html2canvas = await loadHtml2Canvas();
+    await nextFrame();
+    const canvas = await capturePageCanvas(html2canvas);
+    const jpeg   = new Uint8Array(await (await canvasToJpeg(canvas, 0.95)).arrayBuffer());
+    const name   = pdfFileName();
+    const blob   = buildPdfFromJpeg(jpeg, canvas.width, canvas.height, name.replace(/\.pdf$/, ''));
+    _lastPdf = { blob, name };
+    console.log('[pdf] generated', name, canvas.width + 'x' + canvas.height, blob.size + ' bytes');
+    prog.classList.remove('show');
+    openPdfModal(name);
+  } catch (e) {
+    console.error('[pdf] failed:', e);
+    prog.classList.remove('show');
+    alert('PDFの作成に失敗しました（' + (e && e.message ? e.message : e) + '）。\nブラウザの印刷画面を開きます。');
+    window.print();
+  } finally {
+    prog.classList.remove('show');
+    btn.disabled = false; btn.textContent = label;
+    _pdfBusy = false;
+  }
 }
 
 /* ── Service Worker 登録 ── */
@@ -1094,6 +1318,20 @@ document.addEventListener('DOMContentLoaded', () => {
       <button id="modal-save"   class="modal-btn modal-btn--save">保存</button>
       <button id="modal-delete" class="modal-btn modal-btn--delete">削除</button>
       <button id="modal-cancel" class="modal-btn modal-btn--cancel">キャンセル</button>
+    </div>
+  </div>
+</div>
+
+<div id="pdf-progress"><div class="spin"></div><div>PDFを作成しています…</div></div>
+
+<div id="pdf-modal" class="modal-overlay" hidden>
+  <div class="modal-box">
+    <h3 class="modal-title">PDFができました</h3>
+    <div class="pdf-modal-file" id="pdf-modal-file"></div>
+    <div class="pdf-modal-note">「共有・保存」から<b>プリント</b>（AirPrint）や「ファイルに保存」を選べます。<br>URL・日付・ページ番号は入りません。</div>
+    <div class="modal-actions modal-actions--vertical">
+      <button id="pdf-share-btn" class="modal-btn modal-btn--save">共有・保存</button>
+      <button id="pdf-close-btn" class="modal-btn modal-btn--cancel">閉じる</button>
     </div>
   </div>
 </div>
